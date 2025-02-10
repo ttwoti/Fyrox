@@ -56,6 +56,7 @@ use crate::{
     },
 };
 pub use rapier2d::geometry::shape::*;
+use rapier2d::geometry::BroadPhase;
 use rapier2d::{
     dynamics::{
         CCDSolver, GenericJoint, GenericJointBuilder, ImpulseJointHandle, ImpulseJointSet,
@@ -64,10 +65,9 @@ use rapier2d::{
         RigidBodyType,
     },
     geometry::{
-        Collider, ColliderBuilder, ColliderHandle, ColliderSet, Cuboid, DefaultBroadPhase,
-        InteractionGroups, NarrowPhase, Ray, SharedShape,
+        Collider, ColliderBuilder, ColliderHandle, ColliderSet, Cuboid, InteractionGroups,
+        NarrowPhase, Ray, SharedShape,
     },
-    parry::query::ShapeCastOptions,
     pipeline::{DebugRenderPipeline, EventHandler, PhysicsPipeline, QueryPipeline},
 };
 use std::{
@@ -242,7 +242,7 @@ impl ContactPair {
                                 local_p2: p.local_p2.coords,
                                 dist: p.dist,
                                 impulse: p.data.impulse,
-                                tangent_impulse: p.data.tangent_impulse.x,
+                                tangent_impulse: p.data.tangent_impulse,
                             })
                             .collect(),
                         local_n1: m.local_n1,
@@ -315,7 +315,7 @@ fn convert_joint_params(
         scene::dim2::joint::JointParams::FixedJoint(_) => {}
         scene::dim2::joint::JointParams::PrismaticJoint(v) => {
             if v.limits_enabled {
-                joint.set_limits(JointAxis::LinX, [v.limits.start, v.limits.end]);
+                joint.set_limits(JointAxis::X, [v.limits.start, v.limits.end]);
             }
         }
     }
@@ -361,7 +361,11 @@ fn tile_map_to_collider_shape(
         }
     }
 
-    SharedShape::trimesh(vertices, triangles).ok()
+    if triangles.is_empty() {
+        None
+    } else {
+        Some(SharedShape::trimesh(vertices, triangles))
+    }
 }
 
 // Converts descriptor in a shared shape.
@@ -438,7 +442,7 @@ pub struct PhysicsWorld {
     // Broad phase performs rough intersection checks.
     #[visit(skip)]
     #[reflect(hidden)]
-    broad_phase: DefaultBroadPhase,
+    broad_phase: BroadPhase,
     // Narrow phase is responsible for precise contact generation.
     #[visit(skip)]
     #[reflect(hidden)]
@@ -569,7 +573,7 @@ impl PhysicsWorld {
             pipeline: PhysicsPipeline::new(),
             gravity: Vector2::new(0.0, -9.81).into(),
             integration_parameters: IntegrationParameters::default().into(),
-            broad_phase: DefaultBroadPhase::new(),
+            broad_phase: BroadPhase::new(),
             narrow_phase: NarrowPhase::new(),
             ccd_solver: CCDSolver::new(),
             islands: IslandManager::new(),
@@ -597,17 +601,13 @@ impl PhysicsWorld {
             let integration_parameters = rapier2d::dynamics::IntegrationParameters {
                 dt: self.integration_parameters.dt.unwrap_or(dt),
                 min_ccd_dt: self.integration_parameters.min_ccd_dt,
-                contact_damping_ratio: self.integration_parameters.contact_damping_ratio,
-                contact_natural_frequency: self.integration_parameters.contact_natural_frequency,
-                joint_natural_frequency: self.integration_parameters.joint_natural_frequency,
+                erp: self.integration_parameters.erp,
+                damping_ratio: self.integration_parameters.damping_ratio,
+                joint_erp: self.integration_parameters.joint_erp,
                 joint_damping_ratio: self.integration_parameters.joint_damping_ratio,
-                warmstart_coefficient: self.integration_parameters.warmstart_coefficient,
-                length_unit: self.integration_parameters.length_unit,
-                normalized_allowed_linear_error: self.integration_parameters.allowed_linear_error,
-                normalized_max_corrective_velocity: self
-                    .integration_parameters
-                    .normalized_max_corrective_velocity,
-                normalized_prediction_distance: self.integration_parameters.prediction_distance,
+                allowed_linear_error: self.integration_parameters.allowed_linear_error,
+                max_penetration_correction: self.integration_parameters.max_penetration_correction,
+                prediction_distance: self.integration_parameters.prediction_distance,
                 num_solver_iterations: NonZeroUsize::new(
                     self.integration_parameters.num_solver_iterations,
                 )
@@ -618,9 +618,6 @@ impl PhysicsWorld {
                 num_internal_pgs_iterations: self
                     .integration_parameters
                     .num_internal_pgs_iterations,
-                num_internal_stabilization_iterations: self
-                    .integration_parameters
-                    .num_internal_stabilization_iterations,
                 min_island_size: self.integration_parameters.min_island_size as usize,
                 max_ccd_substeps: self.integration_parameters.max_ccd_substeps as usize,
             };
@@ -722,7 +719,7 @@ impl PhysicsWorld {
         // likely end up in panic because of invalid handle stored in internal acceleration
         // structure. This could be fixed by delaying deleting of bodies/collider to the end
         // of the frame.
-        query.update(&self.colliders);
+        query.update(&self.bodies, &self.colliders);
 
         query_buffer.clear();
         let ray = Ray::new(
@@ -747,9 +744,9 @@ impl PhysicsWorld {
                         self.colliders.get(handle).unwrap().user_data,
                     ),
                     normal: intersection.normal,
-                    position: ray.point_at(intersection.time_of_impact),
+                    position: ray.point_at(intersection.toi),
                     feature: intersection.feature.into(),
-                    toi: intersection.time_of_impact,
+                    toi: intersection.toi,
                 })
             },
         );
@@ -832,13 +829,6 @@ impl PhysicsWorld {
 
         let query = self.query.borrow_mut();
 
-        let opts = ShapeCastOptions {
-            max_time_of_impact: max_toi,
-            target_distance: 0.0,
-            stop_at_penetration,
-            compute_impact_geometry_on_penetration: true,
-        };
-
         query
             .cast_shape(
                 &self.bodies,
@@ -846,14 +836,15 @@ impl PhysicsWorld {
                 shape_pos,
                 shape_vel,
                 shape,
-                opts,
+                max_toi,
+                stop_at_penetration,
                 filter,
             )
             .map(|(handle, toi)| {
                 (
                     Handle::decode_from_u128(self.colliders.get(handle).unwrap().user_data),
                     TOI {
-                        toi: toi.time_of_impact,
+                        toi: toi.toi,
                         witness1: toi.witness1,
                         witness2: toi.witness2,
                         normal1: toi.normal1,
@@ -970,13 +961,13 @@ impl PhysicsWorld {
                     rigid_body_node.can_sleep.try_sync_model(|v| {
                         let activation = native.activation_mut();
                         if v {
-                            activation.normalized_linear_threshold =
-                                RigidBodyActivation::default_normalized_linear_threshold();
+                            activation.linear_threshold =
+                                RigidBodyActivation::default_linear_threshold();
                             activation.angular_threshold =
                                 RigidBodyActivation::default_angular_threshold();
                         } else {
                             activation.sleeping = false;
-                            activation.normalized_linear_threshold = -1.0;
+                            activation.linear_threshold = -1.0;
                             activation.angular_threshold = -1.0;
                         };
                     });
@@ -1206,7 +1197,7 @@ impl PhysicsWorld {
             return;
         }
 
-        if let Some(native) = self.joints.set.get_mut(joint.native.get(), false) {
+        if let Some(native) = self.joints.set.get_mut(joint.native.get()) {
             joint.body1.try_sync_model(|v| {
                 if let Some(rigid_body_node) = nodes
                     .try_borrow(v)

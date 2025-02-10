@@ -409,28 +409,24 @@ pub enum TOIStatus {
     Penetrating,
 }
 
-impl From<rapier3d::parry::query::ShapeCastStatus> for TOIStatus {
-    fn from(value: rapier3d::parry::query::ShapeCastStatus) -> Self {
+impl From<rapier3d::parry::query::TOIStatus> for TOIStatus {
+    fn from(value: rapier3d::parry::query::TOIStatus) -> Self {
         match value {
-            rapier3d::parry::query::ShapeCastStatus::OutOfIterations => Self::OutOfIterations,
-            rapier3d::parry::query::ShapeCastStatus::Converged => Self::Converged,
-            rapier3d::parry::query::ShapeCastStatus::Failed => Self::Failed,
-            rapier3d::parry::query::ShapeCastStatus::PenetratingOrWithinTargetDist => {
-                Self::Penetrating
-            }
+            rapier3d::parry::query::TOIStatus::OutOfIterations => Self::OutOfIterations,
+            rapier3d::parry::query::TOIStatus::Converged => Self::Converged,
+            rapier3d::parry::query::TOIStatus::Failed => Self::Failed,
+            rapier3d::parry::query::TOIStatus::Penetrating => Self::Penetrating,
         }
     }
 }
 
-impl From<rapier2d::parry::query::ShapeCastStatus> for TOIStatus {
-    fn from(value: rapier2d::parry::query::ShapeCastStatus) -> Self {
+impl From<rapier2d::parry::query::TOIStatus> for TOIStatus {
+    fn from(value: rapier2d::parry::query::TOIStatus) -> Self {
         match value {
-            rapier2d::parry::query::ShapeCastStatus::OutOfIterations => Self::OutOfIterations,
-            rapier2d::parry::query::ShapeCastStatus::Converged => Self::Converged,
-            rapier2d::parry::query::ShapeCastStatus::Failed => Self::Failed,
-            rapier2d::parry::query::ShapeCastStatus::PenetratingOrWithinTargetDist => {
-                Self::Penetrating
-            }
+            rapier2d::parry::query::TOIStatus::OutOfIterations => Self::OutOfIterations,
+            rapier2d::parry::query::TOIStatus::Converged => Self::Converged,
+            rapier2d::parry::query::TOIStatus::Failed => Self::Failed,
+            rapier2d::parry::query::TOIStatus::Penetrating => Self::Penetrating,
         }
     }
 }
@@ -1011,7 +1007,7 @@ impl ColliderBuilder {
         self
     }
 
-    /// Sets desired friction value.    
+    /// Sets desired friction value.
     pub fn with_friction(mut self, friction: f32) -> Self {
         self.friction = friction;
         self
@@ -1023,7 +1019,7 @@ impl ColliderBuilder {
         self
     }
 
-    /// Sets desired solver groups.    
+    /// Sets desired solver groups.
     pub fn with_solver_groups(mut self, solver_groups: InteractionGroups) -> Self {
         self.solver_groups = solver_groups;
         self

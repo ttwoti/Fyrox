@@ -61,10 +61,10 @@ use rapier3d::{
         RigidBodyActivation, RigidBodyBuilder, RigidBodyHandle, RigidBodySet, RigidBodyType,
     },
     geometry::{
-        Collider, ColliderBuilder, ColliderHandle, ColliderSet, Cuboid, DefaultBroadPhase,
+        BroadPhase, Collider, ColliderBuilder, ColliderHandle, ColliderSet, Cuboid,
         InteractionGroups, NarrowPhase, Ray, SharedShape,
     },
-    parry::{query::ShapeCastOptions, shape::HeightField},
+    parry::shape::HeightField,
     pipeline::{DebugRenderPipeline, EventHandler, PhysicsPipeline, QueryPipeline},
     prelude::{HeightFieldCellStatus, JointAxis, MassProperties},
 };
@@ -449,7 +449,7 @@ fn convert_joint_params(
         scene::joint::JointParams::FixedJoint(_) => {}
         scene::joint::JointParams::PrismaticJoint(v) => {
             if v.limits_enabled {
-                joint.set_limits(JointAxis::LinX, [v.limits.start, v.limits.end]);
+                joint.set_limits(JointAxis::X, [v.limits.start, v.limits.end]);
             }
         }
         scene::joint::JointParams::RevoluteJoint(v) => {
@@ -469,7 +469,7 @@ fn make_trimesh(
     owner: Handle<Node>,
     sources: &[GeometrySource],
     nodes: &NodePool,
-) -> Option<SharedShape> {
+) -> SharedShape {
     let mut mesh_builder = RawMeshBuilder::new(0, 0);
 
     // Create inverse transform that will discard rotation and translation, but leave scaling and
@@ -554,9 +554,9 @@ fn make_trimesh(
             ),
         );
 
-        SharedShape::trimesh(vec![Point3::new(0.0, 0.0, 0.0)], vec![[0, 0, 0]]).ok()
+        SharedShape::trimesh(vec![Point3::new(0.0, 0.0, 0.0)], vec![[0, 0, 0]])
     } else {
-        SharedShape::trimesh(vertices, indices).ok()
+        SharedShape::trimesh(vertices, indices)
     }
 }
 
@@ -756,12 +756,12 @@ fn collider_shape_into_native_shape(
             if trimesh.sources.is_empty() {
                 None
             } else {
-                make_trimesh(
+                Some(make_trimesh(
                     owner_inv_global_transform,
                     owner_collider,
                     &trimesh.sources,
                     pool,
-                )
+                ))
             }
         }
         ColliderShape::Heightfield(heightfield) => pool
@@ -813,7 +813,7 @@ pub struct IntegrationParameters {
 Larger values make the constraints more compliant (allowing more visible penetrations
 before stabilization). Default `5.0`."
     )]
-    pub contact_damping_ratio: f32,
+    pub erp: f32,
 
     /// The natural frequency used by the springs for contact constraint regularization.
     /// Increasing this value will make it so that penetrations get fixed more quickly at the
@@ -828,17 +828,18 @@ expense of potential jitter effects due to overshooting. In order to make the si
 look stiffer, it is recommended to increase the `contact_damping_ratio` instead of this
 value. Default: `30.0`"
     )]
-    pub contact_natural_frequency: f32,
+    pub damping_ratio: f32,
 
     /// The natural frequency used by the springs for joint constraint regularization.
     /// Increasing this value will make it so that penetrations get fixed more quickly.
     /// Default: `1.0e6`
     #[reflect(
         min_value = 0.0,
-        description = "The natural frequency used by the springs for joint constraint regularization.
-Increasing this value will make it so that penetrations get fixed more quickly. Default: `1.0e6`."
+        max_value = 1.0,
+        description = "The Error Reduction Parameter for joints in `[0, 1]` is the proportion \
+        of the positional error to be corrected at each time step (default: `0.8`)."
     )]
-    pub joint_natural_frequency: f32,
+    pub joint_erp: f32,
 
     /// The fraction of critical damping applied to the joint for constraints regularization.
     /// (default `0.8`).
@@ -861,7 +862,7 @@ Increasing this value will make it so that penetrations get fixed more quickly. 
         min_value = 0.0,
         description = "Maximum amount of penetration the solver will attempt to resolve in one timestep (default: `10.0`)."
     )]
-    pub normalized_max_corrective_velocity: f32,
+    pub max_penetration_correction: f32,
 
     /// The maximal distance separating two objects that will generate predictive contacts (default: `0.002`).
     #[reflect(
@@ -928,13 +929,13 @@ impl Default for IntegrationParameters {
         Self {
             dt: None,
             min_ccd_dt: 1.0 / 60.0 / 100.0,
-            contact_damping_ratio: 5.0,
-            contact_natural_frequency: 30.0,
-            joint_natural_frequency: 1.0e6,
+            erp: 0.8,
+            damping_ratio: 0.25,
+            joint_erp: 0.9,
             joint_damping_ratio: 1.0,
             warmstart_coefficient: 1.0,
             allowed_linear_error: 0.002,
-            normalized_max_corrective_velocity: 10.0,
+            max_penetration_correction: f32::MAX,
             prediction_distance: 0.002,
             num_internal_pgs_iterations: 1,
             num_additional_friction_iterations: 4,
@@ -974,7 +975,7 @@ pub struct PhysicsWorld {
     // Broad phase performs rough intersection checks.
     #[visit(skip)]
     #[reflect(hidden)]
-    broad_phase: DefaultBroadPhase,
+    broad_phase: BroadPhase,
     // Narrow phase is responsible for precise contact generation.
     #[visit(skip)]
     #[reflect(hidden)]
@@ -1106,7 +1107,7 @@ impl PhysicsWorld {
             pipeline: PhysicsPipeline::new(),
             gravity: Vector3::new(0.0, -9.81, 0.0).into(),
             integration_parameters: IntegrationParameters::default().into(),
-            broad_phase: DefaultBroadPhase::new(),
+            broad_phase: BroadPhase::new(),
             narrow_phase: NarrowPhase::new(),
             ccd_solver: CCDSolver::new(),
             islands: IslandManager::new(),
@@ -1134,17 +1135,13 @@ impl PhysicsWorld {
             let integration_parameters = rapier3d::dynamics::IntegrationParameters {
                 dt: self.integration_parameters.dt.unwrap_or(dt),
                 min_ccd_dt: self.integration_parameters.min_ccd_dt,
-                contact_damping_ratio: self.integration_parameters.contact_damping_ratio,
-                contact_natural_frequency: self.integration_parameters.contact_natural_frequency,
-                joint_natural_frequency: self.integration_parameters.joint_natural_frequency,
+                erp: self.integration_parameters.erp,
+                damping_ratio: self.integration_parameters.damping_ratio,
+                joint_erp: self.integration_parameters.joint_erp,
                 joint_damping_ratio: self.integration_parameters.joint_damping_ratio,
-                warmstart_coefficient: self.integration_parameters.warmstart_coefficient,
-                length_unit: self.integration_parameters.length_unit,
-                normalized_allowed_linear_error: self.integration_parameters.allowed_linear_error,
-                normalized_max_corrective_velocity: self
-                    .integration_parameters
-                    .normalized_max_corrective_velocity,
-                normalized_prediction_distance: self.integration_parameters.prediction_distance,
+                allowed_linear_error: self.integration_parameters.allowed_linear_error,
+                max_penetration_correction: self.integration_parameters.max_penetration_correction,
+                prediction_distance: self.integration_parameters.prediction_distance,
                 num_solver_iterations: NonZeroUsize::new(
                     self.integration_parameters.num_solver_iterations,
                 )
@@ -1155,9 +1152,6 @@ impl PhysicsWorld {
                 num_internal_pgs_iterations: self
                     .integration_parameters
                     .num_internal_pgs_iterations,
-                num_internal_stabilization_iterations: self
-                    .integration_parameters
-                    .num_internal_stabilization_iterations,
                 min_island_size: self.integration_parameters.min_island_size as usize,
                 max_ccd_substeps: self.integration_parameters.max_ccd_substeps as usize,
             };
@@ -1259,7 +1253,7 @@ impl PhysicsWorld {
         // likely end up in panic because of invalid handle stored in internal acceleration
         // structure. This could be fixed by delaying deleting of bodies/collider to the end
         // of the frame.
-        query.update(&self.colliders);
+        query.update(&self.bodies, &self.colliders);
 
         query_buffer.clear();
         let ray = Ray::new(
@@ -1284,9 +1278,9 @@ impl PhysicsWorld {
                         self.colliders.get(handle).unwrap().user_data,
                     ),
                     normal: intersection.normal,
-                    position: ray.point_at(intersection.time_of_impact),
+                    position: ray.point_at(intersection.toi),
                     feature: intersection.feature.into(),
-                    toi: intersection.time_of_impact,
+                    toi: intersection.toi,
                 })
             },
         );
@@ -1369,13 +1363,6 @@ impl PhysicsWorld {
 
         let query = self.query.borrow_mut();
 
-        let opts = ShapeCastOptions {
-            max_time_of_impact: max_toi,
-            target_distance: 0.0,
-            stop_at_penetration,
-            compute_impact_geometry_on_penetration: true,
-        };
-
         query
             .cast_shape(
                 &self.bodies,
@@ -1383,14 +1370,15 @@ impl PhysicsWorld {
                 shape_pos,
                 shape_vel,
                 shape,
-                opts,
+                max_toi,
+                stop_at_penetration,
                 filter,
             )
             .map(|(handle, toi)| {
                 (
                     Handle::decode_from_u128(self.colliders.get(handle).unwrap().user_data),
                     TOI {
-                        toi: toi.time_of_impact,
+                        toi: toi.toi,
                         witness1: toi.witness1,
                         witness2: toi.witness2,
                         normal1: toi.normal1,
@@ -1547,13 +1535,13 @@ impl PhysicsWorld {
                     rigid_body_node.can_sleep.try_sync_model(|v| {
                         let activation = native.activation_mut();
                         if v {
-                            activation.normalized_linear_threshold =
-                                RigidBodyActivation::default_normalized_linear_threshold();
+                            activation.linear_threshold =
+                                RigidBodyActivation::default_linear_threshold();
                             activation.angular_threshold =
                                 RigidBodyActivation::default_angular_threshold();
                         } else {
                             activation.sleeping = false;
-                            activation.normalized_linear_threshold = -1.0;
+                            activation.linear_threshold = -1.0;
                             activation.angular_threshold = -1.0;
                         };
                     });
@@ -1819,7 +1807,7 @@ impl PhysicsWorld {
             return;
         }
 
-        if let Some(native) = self.joints.set.get_mut(joint.native.get(), false) {
+        if let Some(native) = self.joints.set.get_mut(joint.native.get()) {
             joint.body1.try_sync_model(|v| {
                 if let Some(rigid_body_node) = nodes
                     .try_borrow(v)

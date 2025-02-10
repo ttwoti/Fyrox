@@ -73,8 +73,8 @@ impl Visit for AxisAlignedBoundingBox {
     fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
         let mut region = visitor.enter_region(name)?;
 
-        self.min.visit("Min", &mut region)?;
-        self.max.visit("Max", &mut region)?;
+        self.min.data.0.visit("Min", &mut region)?;
+        self.max.data.0.visit("Max", &mut region)?;
 
         Ok(())
     }
@@ -99,7 +99,7 @@ impl Visit for Plane {
     fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
         let mut region = visitor.enter_region(name)?;
 
-        self.normal.visit("Normal", &mut region)?;
+        self.normal.data.0.visit("Normal", &mut region)?;
         self.d.visit("D", &mut region)?;
 
         Ok(())
